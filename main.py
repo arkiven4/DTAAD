@@ -25,7 +25,6 @@ def convert_to_windows(data, model):
         windows.append(w if 'DTAAD' in args.model or 'Attention' in args.model or 'TranAD' in args.model else w.view(-1))
     return torch.stack(windows)
 
-
 def load_dataset(dataset):
     folder = os.path.join(output_folder, dataset)
     if not os.path.exists(folder):
@@ -125,7 +124,7 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training=True):
         if training:
             for d in data:
                 d = d.to(torch.device(args.Device))
-                ae = model(d)
+                ae, ats = model(d)
                 # res.append(torch.mean(ats, axis=0).view(-1))
                 l1 = l(ae, d)
                 l1s.append(torch.mean(l1).item())
@@ -141,7 +140,7 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training=True):
             model.to(torch.device('cpu'))
             ae1s, y_pred = [], []
             for d in data:
-                ae1 = model(d)
+                ae1, ats = model(d)
                 y_pred.append(ae1[-1])
                 ae1s.append(ae1)
             ae1s, y_pred = torch.stack(ae1s), torch.stack(y_pred)
@@ -211,12 +210,15 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training=True):
     elif model.name in ['GDN', 'MTAD_GAT', 'MSCRED', 'CAE_M']:
         l = nn.MSELoss(reduction='none')
         model.to(torch.device(args.Device))
+        torch.set_default_device(torch.device(args.Device))
+        model = model.to('cuda:0')
         n = epoch + 1
         w_size = model.n_window
         l1s = []
         if training:
             for i, d in enumerate(data):
                 d = d.to(torch.device(args.Device))
+                d = d.to('cuda:0')
                 if 'MTAD_GAT' in model.name:
                     x, h = model(d, h if i else None)
                 else:
@@ -245,6 +247,7 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training=True):
     elif 'GAN' in model.name:
         l = nn.MSELoss(reduction='none')
         model.to(torch.device(args.Device))
+        model = model.to(torch.device('cuda:0'))
         bcel = nn.BCELoss(reduction='mean')
         msel = nn.MSELoss(reduction='mean')
         real_label, fake_label = torch.tensor([0.9]), torch.tensor([0.1])  # label smoothing
@@ -256,16 +259,17 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training=True):
             for d in data:
                 # training discriminator
                 d = d.to(torch.device(args.Device))
+                d = d.to('cuda:0')
                 model.discriminator.zero_grad()
                 _, real, fake = model(d)
-                dl = bcel(real, real_label) + bcel(fake, fake_label)
+                dl = bcel(real.to('cuda:0'), real_label.to('cuda:0')) + bcel(fake.to('cuda:0'), fake_label.to('cuda:0'))
                 dl.backward()
                 model.generator.zero_grad()
                 optimizer.step()
                 # training generator
                 z, _, fake = model(d)
                 mse = msel(z, d)
-                gl = bcel(fake, real_label)
+                gl = bcel(fake.to('cuda:0'), real_label.to('cuda:0'))
                 tl = gl + mse
                 tl.backward()
                 model.discriminator.zero_grad()
@@ -378,16 +382,17 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training=True):
 
 if __name__ == '__main__':
     train_loader, test_loader, labels = load_dataset(args.dataset)
-    model, optimizer, scheduler, epoch, accuracy_list = load_model(args.model, labels.shape[1])
-
-    ## Prepare data
     trainD, testD = next(iter(train_loader)), next(iter(test_loader))
     trainO, testO = trainD, testD
+    model, optimizer, scheduler, epoch, accuracy_list = load_model(args.model, trainO.shape[1])
+
+    ## Prepare data
+
     if model.name in ['Attention', 'DAGMM', 'USAD', 'MSCRED', 'CAE_M', 'GDN', 'MTAD_GAT',
                       'MAD_GAN', 'TranAD'] or 'DTAAD' in model.name:
         trainD, testD = convert_to_windows(trainD, model), convert_to_windows(testD, model)
 
-    ### Training phase
+    # ### Training phase
     if not args.test:
         print(f'{color.HEADER}Training {args.model} on {args.dataset}{color.ENDC}')
         num_epochs = 5
@@ -416,21 +421,25 @@ if __name__ == '__main__':
         if 'DTAAD' in model.name:
             plot_attention(model, 1, f'{args.model}_{args.dataset}')
 
-    ### Scores
-    df = pd.DataFrame()
-    lossT, _ = backprop(0, model, trainD, trainO, optimizer, scheduler, training=False)
-    for i in range(loss.shape[1]):
-        lt, l, ls = lossT[:, i], loss[:, i], labels[:, i]
-        result, pred = pot_eval(lt, l, ls)
-        preds.append(pred)
-        df = df.append(result, ignore_index=True)
-    # preds = np.concatenate([i.reshape(-1, 1) + 0 for i in preds], axis=1)
-    # pd.DataFrame(preds, columns=[str(i) for i in range(10)]).to_csv('labels.csv')
-    lossTfinal, lossFinal = np.mean(lossT, axis=1), np.mean(loss, axis=1)
-    labelsFinal = (np.sum(labels, axis=1) >= 1) + 0
-    result, _ = pot_eval(lossTfinal, lossFinal, labelsFinal)
-    result.update(hit_att(loss, labels))
-    result.update(ndcg(loss, labels))
-    print(df)
-    pprint(result)
-    # pprint(getresults2(df, result))
+    # ### Scores
+    # df = pd.DataFrame()
+    # lossT, _ = backprop(0, model, trainD, trainO, optimizer, scheduler, training=False)
+
+    # results = []
+    # for i in range(loss.shape[1]):
+    #     lt, l, ls = lossT[:, i], loss[:, i], labels[:, i]
+    #     result, pred = pot_eval(lt, l, ls)
+    #     preds.append(pred)
+    #     results.append(result)
+
+    # df = pd.concat([df, pd.DataFrame(results)], ignore_index=True)    
+    # # preds = np.concatenate([i.reshape(-1, 1) + 0 for i in preds], axis=1)
+    # # pd.DataFrame(preds, columns=[str(i) for i in range(10)]).to_csv('labels.csv')
+    # lossTfinal, lossFinal = np.mean(lossT, axis=1), np.mean(loss, axis=1)
+    # labelsFinal = (np.sum(labels, axis=1) >= 1) + 0
+    # result, _ = pot_eval(lossTfinal, lossFinal, labelsFinal)
+    # result.update(hit_att(loss, labels))
+    # result.update(ndcg(loss, labels))
+    # print(df)
+    # pprint(result)
+    # # pprint(getresults2(df, result))

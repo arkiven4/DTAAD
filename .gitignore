@@ -8,6 +8,10 @@ checkpoints/
 data/MSDS/metrics
 data/MSDS/train.csv
 data/MSDS/test.csv
+result_colate
+result_ensemble
+loss_fold
+data/
 
 # C extensions
 *.so

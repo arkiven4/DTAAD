@@ -28,4 +28,14 @@ parser.add_argument('--retrain',
 parser.add_argument('--less',
                     action='store_true',
                     help="train using less data")
-args = parser.parse_args()
+
+#args = parser.parse_args()
+
+config = {
+    'dataset': 'CustomAWGN30ES15',
+    'model': '',
+    'Device': 'cpu',
+}
+
+args = parser.parse_args([])
+args.__dict__.update(config)

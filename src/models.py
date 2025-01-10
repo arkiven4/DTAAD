@@ -4,7 +4,7 @@ import torch.optim as optim
 import pickle
 import dgl.nn
 from dgl.nn.pytorch import GATConv
-from torch.nn import TransformerEncoder
+from torch.nn import TransformerEncoder, TransformerDecoder
 from src.gltcn import *
 from src.dlutils import *
 from src.constants import *
@@ -276,7 +276,7 @@ class MTAD_GAT(nn.Module):
         self.n_window = feats
         self.n_hidden = feats * feats
         self.g = dgl.graph((torch.tensor(list(range(1, feats + 1))), torch.tensor([0] * feats)))
-        self.g = dgl.add_self_loop(self.g)
+        self.g = dgl.add_self_loop(self.g)#.to('cuda:0')
         self.feature_gat = GATConv(feats, 1, feats)
         self.time_gat = GATConv(feats, 1, feats)
         self.gru = nn.GRU((feats + 1) * feats * 3, feats * feats, 1)
@@ -308,7 +308,7 @@ class GDN(nn.Module):
         src_ids = np.repeat(np.array(list(range(feats))), feats)
         dst_ids = np.array(list(range(feats)) * feats)
         self.g = dgl.graph((torch.tensor(src_ids), torch.tensor(dst_ids)))
-        self.g = dgl.add_self_loop(self.g)
+        self.g = dgl.add_self_loop(self.g)#.to('cuda:0')
         self.feature_gat = GATConv(1, 1, feats)
         self.attention = nn.Sequential(
             nn.Linear(self.n, self.n_hidden), nn.LeakyReLU(True),
@@ -324,7 +324,7 @@ class GDN(nn.Module):
         # Bahdanau style attention
         att_score = self.attention(data).view(self.n_window, 1)
         data = data.view(self.n_window, self.n_feats)
-        data_r = torch.matmul(data.permute(1, 0), att_score)
+        data_r = torch.matmul(data.permute(1, 0), att_score).to(data.device)
         # GAT convolution on complete graph
         feat_r = self.feature_gat(self.g, data_r)
         feat_r = feat_r.view(self.n_feats, self.n_feats)
