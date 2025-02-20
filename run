@@ -8,7 +8,7 @@ python main.py --model GDN --dataset CustomAWGN30ES15 --retrain --Device cuda
 
 python main.py --model DAGMM --dataset CustomAWGN30ES15 --retrain --Device cuda
 python main.py --model USAD --dataset CustomAWGN30ES15 --retrain --Device cuda
-python main.py --model MSCRED --dataset CustomAWGN30ES15 --retrain --Device cuda
+python main.py --model OmniAnomaly --dataset CustomAWGN30ES15 --retrain --Device cuda
 
 Attention
 CAE_M
@@ -23,3 +23,23 @@ MTAD_GAT
 
 # Belum di Training
 DAGMM USAD MSCRED
+
+
+
+"Attention", "DTAAD", "MAD_GAN", "TranAD", "DAGMM", "USAD"
+python main.py --model Attention --dataset CLGS2AWGN30ES15 --retrain --Device cuda
+python main.py --model DTAAD --dataset CLGS2AWGN30ES15 --retrain --Device cuda
+python main.py --model MAD_GAN --dataset CLGS2AWGN30ES15 --retrain --Device cuda
+python main.py --model TranAD --dataset CLGS2AWGN30ES15 --retrain --Device cuda
+python main.py --model DAGMM --dataset CLGS2AWGN30ES15 --retrain --Device cuda
+python main.py --model USAD --dataset CLGS2AWGN30ES15 --retrain --Device cuda
+
+
+python main.py --model CAE_M --dataset CLGS2AWGN30ES15 --retrain --Device cuda
+python main.py --model OmniAnomaly --dataset CLGS2AWGN30ES15 --retrain --Device cuda
+
+python main.py --model GDN --dataset CLGS2AWGN30ES15 --retrain --Device cuda
+python main.py --model MSCRED --dataset CLGS2AWGN30ES15 --retrain --Device cuda
+python main.py --model MTAD_GAT --dataset CLGS2AWGN30ES15 --retrain --Device cuda
+
+

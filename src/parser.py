@@ -29,8 +29,8 @@ parser.add_argument('--less',
                     action='store_true',
                     help="train using less data")
 
-#args = parser.parse_args()
-
+# args = parser.parse_args()
+ # CLGS2AWGN30ES15, CustomAWGN30ES15
 config = {
     'dataset': 'CustomAWGN30ES15',
     'model': '',

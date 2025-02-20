@@ -10,6 +10,7 @@ data/MSDS/train.csv
 data/MSDS/test.csv
 result_colate
 result_ensemble
+result_trending
 loss_fold
 data/
 

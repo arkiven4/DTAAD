@@ -109,7 +109,7 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training=True):
             ae1s = []
             for d in data:
                 _, x_hat, _, _ = model(d)
-                ae1s.append(x_hat)
+                ae1s.append(x_hat.half())
             ae1s = torch.stack(ae1s)
             y_pred = ae1s[:, data.shape[1] - feats:data.shape[1]].view(-1, feats)
             loss = l(ae1s, data)[:, data.shape[1] - feats:data.shape[1]].view(-1, feats)
@@ -141,8 +141,8 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training=True):
             ae1s, y_pred = [], []
             for d in data:
                 ae1, ats = model(d)
-                y_pred.append(ae1[-1])
-                ae1s.append(ae1)
+                y_pred.append(ae1[-1].half())
+                ae1s.append(ae1.half())
             ae1s, y_pred = torch.stack(ae1s), torch.stack(y_pred)
             loss = torch.mean(l(ae1s, data), axis=1)
             return loss.detach().numpy(), y_pred.detach().numpy()
@@ -169,7 +169,7 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training=True):
             y_preds = []
             for i, d in enumerate(data):
                 y_pred, _, _, hidden = model(d, hidden if i else None)
-                y_preds.append(y_pred)
+                y_preds.append(y_pred.half())
             y_pred = torch.stack(y_preds)
             MSE = l(y_pred, data)
             return MSE.detach().numpy(), y_pred.detach().numpy()
@@ -199,9 +199,9 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training=True):
             ae1s, ae2s, ae2ae1s = [], [], []
             for d in data:
                 ae1, ae2, ae2ae1 = model(d)
-                ae1s.append(ae1)
-                ae2s.append(ae2)
-                ae2ae1s.append(ae2ae1)
+                ae1s.append(ae1.half())
+                ae2s.append(ae2.half())
+                ae2ae1s.append(ae2ae1.half())
             ae1s, ae2s, ae2ae1s = torch.stack(ae1s), torch.stack(ae2s), torch.stack(ae2ae1s)
             y_pred = ae1s[:, data.shape[1] - feats:data.shape[1]].view(-1, feats)
             loss = 0.1 * l(ae1s, data) + 0.9 * l(ae2ae1s, data)
@@ -238,7 +238,7 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training=True):
                     x, h = model(d, None)
                 else:
                     x = model(d)
-                xs.append(x)
+                xs.append(x.half())
             xs = torch.stack(xs)
             y_pred = xs[:, data.shape[1] - feats:data.shape[1]].view(-1, feats)
             loss = l(xs, data)
@@ -285,7 +285,7 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training=True):
             outputs = []
             for d in data:
                 z, _, _ = model(d)
-                outputs.append(z)
+                outputs.append(z.half())
             outputs = torch.stack(outputs)
             y_pred = outputs[:, data.shape[1] - feats:data.shape[1]].view(-1, feats)
             loss = l(outputs, data)
@@ -324,7 +324,7 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training=True):
                 window = d.permute(1, 0, 2)
                 elem = window[-1, :, :].view(1, bs, feats)
                 z = model(window, elem)
-                if isinstance(z, tuple): z = z[1]
+                if isinstance(z, tuple): z = z[1].half()
             loss = l(z, elem)[0]
             return loss.detach().numpy(), z.detach().numpy()[0]
     elif 'DTAAD' in model.name:
@@ -360,7 +360,7 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training=True):
                 window = d.permute(0, 2, 1)
                 elem = window[:, :, -1].view(1, bs, feats)
                 z = model(window)
-                z = z[1].permute(1, 0, 2)
+                z = z[1].permute(1, 0, 2).half()
             loss = l(z, elem)[0]
             return loss.detach().numpy(), z.detach().numpy()[0]
     else:
