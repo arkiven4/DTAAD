@@ -211,14 +211,12 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training=True):
         l = nn.MSELoss(reduction='none')
         model.to(torch.device(args.Device))
         torch.set_default_device(torch.device(args.Device))
-        model = model.to('cuda:0')
         n = epoch + 1
         w_size = model.n_window
         l1s = []
         if training:
             for i, d in enumerate(data):
                 d = d.to(torch.device(args.Device))
-                d = d.to('cuda:0')
                 if 'MTAD_GAT' in model.name:
                     x, h = model(d, h if i else None)
                 else:
@@ -247,7 +245,6 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training=True):
     elif 'GAN' in model.name:
         l = nn.MSELoss(reduction='none')
         model.to(torch.device(args.Device))
-        model = model.to(torch.device('cuda:0'))
         bcel = nn.BCELoss(reduction='mean')
         msel = nn.MSELoss(reduction='mean')
         real_label, fake_label = torch.tensor([0.9]), torch.tensor([0.1])  # label smoothing
@@ -259,17 +256,16 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training=True):
             for d in data:
                 # training discriminator
                 d = d.to(torch.device(args.Device))
-                d = d.to('cuda:0')
                 model.discriminator.zero_grad()
                 _, real, fake = model(d)
-                dl = bcel(real.to('cuda:0'), real_label.to('cuda:0')) + bcel(fake.to('cuda:0'), fake_label.to('cuda:0'))
+                dl = bcel(real.to(args.Device), real_label.to(args.Device)) + bcel(fake.to(args.Device), fake_label.to(args.Device))
                 dl.backward()
                 model.generator.zero_grad()
                 optimizer.step()
                 # training generator
                 z, _, fake = model(d)
                 mse = msel(z, d)
-                gl = bcel(fake.to('cuda:0'), real_label.to('cuda:0'))
+                gl = bcel(fake.to(args.Device), real_label.to(args.Device))
                 tl = gl + mse
                 tl.backward()
                 model.discriminator.zero_grad()

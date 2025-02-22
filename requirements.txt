@@ -1,9 +1,11 @@
 pandas
 tqdm
 matplotlib
-dgl
+dgl==2.0.0
 numpy
 SciencePlots
 scikit-learn
 xlrd==1.2.0
 seaborn
+#torch==2.4.1
+torch==1.7.1
