@@ -43,3 +43,11 @@ python main.py --model MSCRED --dataset CLGS2AWGN30ES15 --retrain --Device cuda
 python main.py --model MTAD_GAT --dataset CLGS2AWGN30ES15 --retrain --Device cuda
 
 
+# "Attention", "DTAAD", "MAD_GAN", "TranAD", "DAGMM", "USAD"
+python main.py --model Attention --dataset Custom2024AWGN30ES15 --retrain --Device cuda
+python main.py --model DTAAD --dataset Custom2024AWGN30ES15 --retrain --Device cuda
+python main.py --model MAD_GAN --dataset Custom2024AWGN30ES15 --retrain --Device cuda
+python main.py --model TranAD --dataset Custom2024AWGN30ES15 --retrain --Device cuda
+python main.py --model DAGMM --dataset Custom2024AWGN30ES15 --retrain --Device cuda
+python main.py --model USAD --dataset Custom2024AWGN30ES15 --retrain --Device cuda
+
