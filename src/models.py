@@ -276,7 +276,7 @@ class MTAD_GAT(nn.Module):
         self.n_window = feats
         self.n_hidden = feats * feats
         self.g = dgl.graph((torch.tensor(list(range(1, feats + 1))), torch.tensor([0] * feats)))
-        self.g = dgl.add_self_loop(self.g).to('cuda:0')
+        self.g = dgl.add_self_loop(self.g)#.to('cuda:0')
         self.feature_gat = GATConv(feats, 1, feats)
         self.time_gat = GATConv(feats, 1, feats)
         self.gru = nn.GRU((feats + 1) * feats * 3, feats * feats, 1)
@@ -308,7 +308,7 @@ class GDN(nn.Module):
         src_ids = np.repeat(np.array(list(range(feats))), feats)
         dst_ids = np.array(list(range(feats)) * feats)
         self.g = dgl.graph((torch.tensor(src_ids), torch.tensor(dst_ids)))
-        self.g = dgl.add_self_loop(self.g).to('cuda:0')
+        self.g = dgl.add_self_loop(self.g)#.to('cuda:0')
         self.feature_gat = GATConv(1, 1, feats)
         self.attention = nn.Sequential(
             nn.Linear(self.n, self.n_hidden), nn.LeakyReLU(True),

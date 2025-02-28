@@ -7,5 +7,6 @@ SciencePlots
 scikit-learn
 xlrd==1.2.0
 seaborn
-#torch==2.4.1
-torch==1.7.1
+torch==2.4.1
+#torch==1.7.1
+#torch==2.0.0
