@@ -276,7 +276,8 @@ class MTAD_GAT(nn.Module):
         self.n_window = feats
         self.n_hidden = feats * feats
         self.g = dgl.graph((torch.tensor(list(range(1, feats + 1))), torch.tensor([0] * feats)))
-        self.g = dgl.add_self_loop(self.g)#.to('cuda:0')
+        self.g = dgl.add_self_loop(self.g)
+        self.g = self.g#.to('cuda:0')
         self.feature_gat = GATConv(feats, 1, feats)
         self.time_gat = GATConv(feats, 1, feats)
         self.gru = nn.GRU((feats + 1) * feats * 3, feats * feats, 1)
@@ -284,11 +285,11 @@ class MTAD_GAT(nn.Module):
     def forward(self, data, hidden):
         hidden = torch.rand(1, 1, self.n_hidden, dtype=torch.float64) if hidden is not None else hidden
         data = data.view(self.n_window, self.n_feats)
-        data_r = torch.cat((torch.zeros(1, self.n_feats), data))
+        data_r = torch.cat((torch.zeros(1, self.n_feats).to(data.device), data)).to(data.device)
         feat_r = self.feature_gat(self.g, data_r)
-        data_t = torch.cat((torch.zeros(1, self.n_feats), data.t()))
+        data_t = torch.cat((torch.zeros(1, self.n_feats).to(data.device), data.t())).to(data.device)
         time_r = self.time_gat(self.g, data_t)
-        data = torch.cat((torch.zeros(1, self.n_feats), data))
+        data = torch.cat((torch.zeros(1, self.n_feats).to(data.device), data)).to(data.device)
         data = data.view(self.n_window + 1, self.n_feats, 1)
         x = torch.cat((data, feat_r, time_r), dim=2).view(1, 1, -1)
         x, h = self.gru(x, hidden)

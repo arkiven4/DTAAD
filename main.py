@@ -229,9 +229,10 @@ def backprop(epoch, model, data, dataO, optimizer, scheduler, training=True):
             tqdm.write(f'Epoch {epoch},\tMSE = {np.mean(l1s)}')
             return np.mean(l1s), optimizer.param_groups[0]['lr']
         else:
-            model.to(torch.device('cpu'))
+            model.to(torch.device(args.Device))
             xs = []
             for d in data:
+                d = d.to(torch.device(args.Device))
                 if 'MTAD_GAT' in model.name:
                     x, h = model(d, None)
                 else:
