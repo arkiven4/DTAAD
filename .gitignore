@@ -143,3 +143,5 @@ data/WADI/WADI_14days.csv
 data/WADI/WADI_attackdata.csv
 labeled_dataset_2024.csv
 *.db
+*.pickle
+*.csv
