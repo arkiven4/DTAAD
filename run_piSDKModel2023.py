@@ -417,7 +417,7 @@ print ('Connected to server: ' + "PTI-PI")
 
 count = 0
 #df_timestamp_last = np.datetime64('2020-04-28T04:16:00.000000000')
-conn = sqlite3.connect("db_data/original_data.db")
+conn = sqlite3.connect("db/original_data.db")
 cursor = conn.cursor()
 cursor.execute(f"""SELECT * FROM original_data order by rowid desc LIMIT 1""")
 rows = cursor.fetchall()
