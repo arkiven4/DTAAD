@@ -1,1 +1,3 @@
 CustomN = 2020, Remove Shutdown all, 120w, 5mv, 0.002noise
+
+python run_piSDKModel2023.py --dataset CustomAWGN30ES15 --model "" --Device cpu --test
