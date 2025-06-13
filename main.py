@@ -419,24 +419,27 @@ if __name__ == '__main__':
             plot_attention(model, 1, f'{args.model}_{args.dataset}')
 
     # ### Scores
-    # df = pd.DataFrame()
-    # lossT, _ = backprop(0, model, trainD, trainO, optimizer, scheduler, training=False)
+    df = pd.DataFrame()
+    lossT, _ = backprop(0, model, trainD, trainO, optimizer, scheduler, training=False)
+    print(lossT.shape)
+    print(loss.shape)
+    print(labels.shape)
 
-    # results = []
-    # for i in range(loss.shape[1]):
-    #     lt, l, ls = lossT[:, i], loss[:, i], labels[:, i]
-    #     result, pred = pot_eval(lt, l, ls)
-    #     preds.append(pred)
-    #     results.append(result)
+    results = []
+    for i in range(loss.shape[1]):
+        lt, l, ls = lossT[:, i], loss[:, i], labels[:, 0]
+        result, pred = pot_eval(lt, l, ls)
+        preds.append(pred)
+        results.append(result)
 
-    # df = pd.concat([df, pd.DataFrame(results)], ignore_index=True)    
-    # # preds = np.concatenate([i.reshape(-1, 1) + 0 for i in preds], axis=1)
-    # # pd.DataFrame(preds, columns=[str(i) for i in range(10)]).to_csv('labels.csv')
-    # lossTfinal, lossFinal = np.mean(lossT, axis=1), np.mean(loss, axis=1)
-    # labelsFinal = (np.sum(labels, axis=1) >= 1) + 0
-    # result, _ = pot_eval(lossTfinal, lossFinal, labelsFinal)
-    # result.update(hit_att(loss, labels))
-    # result.update(ndcg(loss, labels))
-    # print(df)
-    # pprint(result)
-    # # pprint(getresults2(df, result))
+    df = pd.concat([df, pd.DataFrame(results)], ignore_index=True)    
+    # preds = np.concatenate([i.reshape(-1, 1) + 0 for i in preds], axis=1)
+    # pd.DataFrame(preds, columns=[str(i) for i in range(10)]).to_csv('labels.csv')
+    lossTfinal, lossFinal = np.mean(lossT, axis=1), np.mean(loss, axis=1)
+    labelsFinal = (np.sum(labels, axis=1) >= 1) + 0
+    result, _ = pot_eval(lossTfinal, lossFinal, labelsFinal)
+    result.update(hit_att(loss, labels))
+    result.update(ndcg(loss, labels))
+    print(df)
+    pprint(result)
+    # pprint(getresults2(df, result))
