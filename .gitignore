@@ -13,6 +13,9 @@ result_ensemble
 result_trending
 loss_fold
 data/
+plot_prog/
+db_bak/
+db/
 
 # C extensions
 *.so
