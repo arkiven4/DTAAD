@@ -142,6 +142,90 @@ def update_global_stats(mean_global, M2_global, n_total, mean_i, std_i, n_i):
 
     return mean_global, M2_global, new_total
 
+def percentage2severity(value):
+    return (
+        0 if 0 <= value < 25 else
+        1 if 25 <= value < 50 else
+        2 if 50 <= value < 75 else
+        3 if 75 <= value <= 100 else
+        4
+    )
+
+def calcThres_oneModel(current_time, model_now, current_loss):
+    temp_severity = {}
+    end_date = current_time - timedelta(hours=6)
+    start_date = current_time - timedelta(days=1)
+
+    end_date = end_date.strftime('%Y-%m-%d %H:%M:%S')
+    start_date = start_date.strftime('%Y-%m-%d %H:%M:%S')
+
+    mean_data = fetch_between_dates(start_date, end_date, "db/threshold_mean.db", model_now)[0, 2:].astype(float)
+    m2_data = fetch_between_dates(start_date, end_date, "db/threshold_m2.db", model_now)[0, 2:].astype(float)
+    count_data = fetch_between_dates(start_date, end_date, "db/threshold_count.db", model_now)[0, 2:].astype(float)
+
+    for sensor_idx in range(current_loss.shape[-1]):
+        now_loss = current_loss[:, sensor_idx]
+        std_global = (m2_data[sensor_idx] / (count_data[sensor_idx] - 1))**0.5 if count_data[sensor_idx] > 1 else 0.0
+
+        loss_threb = mean_data[sensor_idx] - (1 * std_global)
+        loss_thre0 = mean_data[sensor_idx] + (0 * std_global)
+        loss_thre1 = mean_data[sensor_idx] + (1 * std_global)
+        loss_thre2 = mean_data[sensor_idx] + (2 * std_global)
+
+        level_1 = (now_loss <= loss_threb)
+        level_2 = (now_loss > loss_thre0) & (now_loss <= loss_thre1)
+        level_3 = (now_loss > loss_thre1) & (now_loss <= loss_thre2)
+        level_4 = (now_loss > loss_thre2)
+
+        x_len = len(now_loss)
+        n1 = np.sum(level_1) / x_len
+        n2 = np.sum(level_2) / x_len
+        n3 = np.sum(level_3) / x_len
+        n4 = np.sum(level_4) / x_len
+
+        raw_score = (0.2 * n1 + 2 * n2 + 3 * n3 + 4 * n4)
+        normalized_score = max(0.0, ((raw_score - 1) / 3) * 100)
+        temp_severity[feature_set[sensor_idx]] = round(float(normalized_score), 2)
+
+    return temp_severity
+
+def calc_counterPercentage(threshold_percentages):
+    mean_severity_percentage = {}
+    for feature_name in feature_set:
+        mean_severity_percentage[feature_name] = {"count": 0, "percentage": 0}
+
+    for modex_idx, values_pred in threshold_percentages.items():
+        for name_feat, percentage in values_pred.items():
+            mean_severity_percentage[name_feat]["count"] = mean_severity_percentage[name_feat]["count"] + 1 if percentage >= 20 else 0
+            mean_severity_percentage[name_feat]["percentage"] = mean_severity_percentage[name_feat]["percentage"] + percentage
+
+    for key, value in mean_severity_percentage.items():
+        if mean_severity_percentage[key]['count'] >= 2:
+            mean_severity_percentage[key]['count'] = round((mean_severity_percentage[key]['count'] / len(model_array)) * 100, 2)
+            mean_severity_percentage[key]['percentage'] = (mean_severity_percentage[key]['percentage'] // len(model_array))
+            mean_severity_percentage[key]['severity'] = percentage2severity(mean_severity_percentage[key]['percentage'])
+        else:
+            mean_severity_percentage[key]['count'] = 0
+            mean_severity_percentage[key]['percentage'] = 0
+            mean_severity_percentage[key]['severity'] = 0
+
+    mean_severity_percentage = dict(sorted(mean_severity_percentage.items(), key=lambda item: item[1]['percentage'], reverse=True))
+
+    # Find Which Model Have Highest Confidence
+    counter_feature_plot = {}
+    for index, value in mean_severity_percentage.items():
+        higher_data = {"model": 0, "percentage": 0}
+        for model_idx in threshold_percentages:
+            if index in threshold_percentages[model_idx]:
+                if higher_data["percentage"] <= threshold_percentages[model_idx][index]:
+                    higher_data["model"] = model_idx
+                    higher_data["percentage"] = threshold_percentages[model_idx][index]
+        
+        counter_feature_plot[index] = higher_data['model']
+
+    return mean_severity_percentage, counter_feature_plot
+
+
 def init_db_timeconst(feature_set, db_name="masters_data.db", table_name="severity_trending"):
     conn = sqlite3.connect(db_name)
     cursor = conn.cursor()
@@ -246,7 +330,7 @@ with open('normalize_2023.pickle', 'rb') as handle:
     normalize_obj = pickle.load(handle)
     min_a, max_a = normalize_obj['min_a'], normalize_obj['max_a']
 
-model_array = ["DTAAD", "MAD_GAN", "TranAD", "DAGMM", "USAD"] #["Attention", "DTAAD", "MAD_GAN", "TranAD", "DAGMM", "USAD", "OmniAnomaly"] # , CAE_M "GDN" MSCRED
+model_array = ["DTAAD", "DAGMM", "USAD"] #["Attention", "DTAAD", "MAD_GAN", "TranAD", "DAGMM", "USAD", "OmniAnomaly"] # , CAE_M "GDN" MSCRED
 model_thr = {}
 for model_name in model_array:
     model_thr[model_name] = 0
@@ -312,7 +396,7 @@ for _ in tqdm(range(total_steps), desc="Progress"):
     shutdown = load_label.get('Shutdown', 0)
     total = load_label.sum()
     bad_pct = (no_load + shutdown) / total
-    if bad_pct > 0.05:  # More than 5%
+    if bad_pct > 0.01:  # More than 5%
         continue
 
     testD, testO, df_timestamp, df_feature = preprocessPD_loadData(df_sel)
@@ -327,7 +411,6 @@ for _ in tqdm(range(total_steps), desc="Progress"):
             testD_now = convert_to_windows(testD, model)
         else:
             testD_now = testD    
-
         loss, y_pred = backprop(0, model, testD_now, testO, None, None, training=False)
 
         for i_loss in range(loss.shape[-1]):
@@ -336,7 +419,6 @@ for _ in tqdm(range(total_steps), desc="Progress"):
             n_i = len(loss[:, i_loss])
 
             feature_now_name = feature_set[i_loss]
-
             mean_global[model_now][feature_now_name], M2_global[model_now][feature_now_name], n_total[model_now][feature_now_name] = update_global_stats(
                 mean_global[model_now][feature_now_name], M2_global[model_now][feature_now_name], n_total[model_now][feature_now_name], mean_i, std_i, n_i
             )
@@ -347,8 +429,12 @@ for _ in tqdm(range(total_steps), desc="Progress"):
 
 init_db_timeconst(feature_set, "db/original_data.db", "original_data")
 init_db_timeconst(['Grid Selection'], "db/original_data.db", "additional_original_data")
+init_db_timeconst(feature_set, "db/severity_trendings.db", "severity_trendings")
+init_db_timeconst(feature_set, "db/severity_trendings.db", "original_sensor")
 for model_name in model_array:
     init_db_timeconst(feature_set, "db/pred_data.db", model_name)
+    init_db_timeconst(feature_set, "db/threshold_data.db", model_name)
+    
     init_db_timeconst(feature_set, "db/threshold_mean.db", model_name)
     init_db_timeconst(feature_set, "db/threshold_m2.db", model_name)
     init_db_timeconst(feature_set, "db/threshold_count.db", model_name)
@@ -378,6 +464,7 @@ for _ in tqdm(range(total_steps), desc="Progress"):
     testD, testO, df_timestamp, df_feature = preprocessPD_loadData(df_sel)
     df_timestamp = df_timestamp.dt.floor("min").values[:120]
 
+    threshold_percentages = {}
     ypred_models = {} 
     calc_stats = {}
     for model_now in model_array:
@@ -390,6 +477,7 @@ for _ in tqdm(range(total_steps), desc="Progress"):
             testD_now = testD
         loss, y_pred = backprop(0, model, testD_now, testO, None, None, training=False)
         ypred_models[model_now] = denormalize3(y_pred, min_a, max_a)
+        threshold_percentages[model_now] = calcThres_oneModel(current_end_window, model_now, loss)
 
         calc_stats[model_now] = {}
         for idx_feat in range(loss.shape[-1]):
@@ -399,7 +487,7 @@ for _ in tqdm(range(total_steps), desc="Progress"):
             temp_std = (M2_global[model_now][feature_now_name] / (n_total[model_now][feature_now_name] - 1))**0.5 if n_total[model_now][feature_now_name] > 1 else 0.0
             temp_mean = mean_global[model_now][feature_now_name]
 
-            thres_bool1 = loss[:, idx_feat] > temp_mean
+            thres_bool1 = (loss[:, idx_feat] > temp_mean) & (loss[:, idx_feat] < temp_mean + temp_std)
             thres_percentage1 = (thres_bool1.sum() / thres_bool1.shape[0]) * 100
 
             thres_bool2 = loss[:, idx_feat] > temp_mean + (temp_std)
@@ -408,8 +496,16 @@ for _ in tqdm(range(total_steps), desc="Progress"):
             # thres_bool2 = loss[:, idx_feat] < temp_mean - (temp_std)
             # thres_percentage2 = (thres_bool2.sum() / thres_bool2.shape[0]) * 100
 
-            if thres_percentage1 >= 20 or thres_percentage2 >= 5: # or thres_percentage2 >= 50:
+            # Perhatikan Threshold ini
+            if thres_percentage1 >= 30 or thres_percentage2 >= 5: # or thres_percentage2 >= 50:
                 calc_stats[model_now][feature_now_name]  = False
+
+    df_feature_mean = trunc(np.mean(df_feature.values, axis=0), decs=2)
+    df_feature = resample(df_feature, 20, axis=0)
+    df_additional = resample(df_additional, 20, axis=0)
+    df_timestamp = df_timestamp.dt.floor("min")[::6].values[:20]
+    for i in range(len(model_array)):
+        ypred_models[i] = resample(ypred_models[i], 20, axis=0)
 
     mask = df_timestamp > df_timestamp_last
     df_feature = denormalize3(df_feature, min_a, max_a)
@@ -418,11 +514,20 @@ for _ in tqdm(range(total_steps), desc="Progress"):
     df_timestamp = df_timestamp[mask]
     for model_now in model_array:
         ypred_models[model_now] = ypred_models[model_now][mask]
-    
+     
     batch_timeseries_savedb(df_timestamp, trunc(df_feature, decs=2), feature_set, "db/original_data.db", "original_data")
     batch_timeseries_savedb(df_timestamp, trunc(df_additional, decs=2), ['Grid Selection'], "db/original_data.db", "additional_original_data")
     for idx_model, (model_name) in enumerate(model_array):
         batch_timeseries_savedb(df_timestamp, trunc(ypred_models[model_name], decs=2), feature_set, "db/pred_data.db", model_name) 
+
+    df_timestampi = pd.to_datetime(df_timestamp[0])
+    counter_feature_trd, _ = calc_counterPercentage(threshold_percentages)
+    trend_data = np.array([counter_feature_trd[key]['percentage'] for key in counter_feature_trd])
+    timeseries_savedb(df_timestampi, trend_data, feature_set, "db/severity_trendings.db", "severity_trendings") 
+    timeseries_savedb(df_timestampi, df_feature_mean, feature_set, "db/severity_trendings.db", "original_sensor") 
+    for model_idx, model_name in enumerate(model_array):
+        timeseries_savedb(df_timestampi, trunc(np.array(list(threshold_percentages[model_idx].values())), decs=2), feature_set, "db/threshold_data.db", model_name) 
+
 
     if bad_pct < 0.001:  # Less than 0.1%  -> Dont Calc Mean and STD
         for model_now in model_array:
@@ -434,11 +539,9 @@ for _ in tqdm(range(total_steps), desc="Progress"):
                         n_i = len(loss[:, i_loss])
         
                         feature_now_name = feature_set[i_loss]
-
                         mean_global[model_now][feature_now_name], M2_global[model_now][feature_now_name], n_total[model_now][feature_now_name] = update_global_stats(
                             mean_global[model_now][feature_now_name], M2_global[model_now][feature_now_name], n_total[model_now][feature_now_name], mean_i, std_i, n_i)
 
-    df_timestampi = pd.to_datetime(df_timestamp[0])
     for model_idx, model_name in enumerate(model_array):
         timeseries_savedb(df_timestampi, trunc(np.array(list(mean_global[model_name].values())), decs=6), feature_set, "db/threshold_mean.db", model_name) 
         timeseries_savedb(df_timestampi, trunc(np.array(list(M2_global[model_name].values())), decs=6), feature_set, "db/threshold_m2.db", model_name) 
