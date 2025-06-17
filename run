@@ -1,5 +1,6 @@
 CustomN = 2020, Remove Shutdown all, 120w, 5mv, 0.002noise
 python run_piSDKModel2023.py --dataset CustomAWGN30ES15 --model "" --Device cpu --test
+zcalc_dynamic_threshold.py --dataset CustomAWGN30ES15 --model "" --Device cpu --test
 
 python main.py --model Attention --dataset CustomAWGN30ES15 --retrain --Device cuda
 python main.py --model CAE_M --dataset CustomAWGN30ES15 --retrain --Device cuda

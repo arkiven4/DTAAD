@@ -258,7 +258,7 @@ for model_now in model_array:
 
 measured_horizon = 60 * 2 * 1
 
-df_data_withtime = pd.read_pickle("my_data_5thn_olah.pickle")
+df_data_withtime = pd.read_pickle("/run/media/fourier/Data2/Pras/Vale/time-series-autoencoder/my_data_5thn_olah.pickle")
 mask = (df_data_withtime['TimeStamp'] >= '2020-01-01 00:00:00')
 df_data_withtime = df_data_withtime.loc[mask]
 
@@ -266,7 +266,7 @@ for column_name in df_data_withtime.columns:
     if column_name != 'Load_Type' and column_name != 'TimeStamp':
         df_data_withtime[column_name] = pd.to_numeric(df_data_withtime[column_name], downcast='float')
         
-df_anomaly = pd.read_excel("shutdown_list.xlsx", 'Sheet2')
+df_anomaly = pd.read_excel("/run/media/fourier/Data2/Pras/Vale/time-series-autoencoder/shutdown_list.xlsx", 'Sheet2')
 df_anomaly['Start Time'] = pd.to_datetime(df_anomaly['Start Time'])
 df_anomaly['End Time'] = pd.to_datetime(df_anomaly['End Time'])
 df_anomaly_unplaned = df_anomaly.copy()
