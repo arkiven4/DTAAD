@@ -1,551 +1,274 @@
 import pickle
 import os
+import sqlite3
+import copy
+import sklearn
 import pandas as pd
 import numpy as np
-import sqlite3
 from tqdm import tqdm
-import copy
 
 from datetime import datetime, timedelta
-from torch.utils.data import Dataset, DataLoader, TensorDataset
-
-import sklearn
+from torch.utils.data import DataLoader
 from scipy.signal import resample
+
 from src.models import *
 from src.utils import *
-from main import  load_dataset, backprop
-
-import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap
-from matplotlib.gridspec import GridSpec
-from matplotlib.dates import DateFormatter
+from main import load_dataset, backprop
+import src.commons as commons
 
 import warnings
 warnings.simplefilter(action='ignore', category=FutureWarning)
 warnings.simplefilter(action='ignore', category=UserWarning)
 
-def normalize3(a, min_a=None, max_a=None):
-    if min_a is None: min_a, max_a = np.min(a, axis=0), np.max(a, axis=0)
-    return ((a - min_a) / (max_a - min_a + 0.0001)), min_a, max_a
+measured_horizon = 60 * 2 * 1
+interval_gap = 30
+model_array = ["DTAAD", "DAGMM", "USAD"]
 
-def denormalize3(a_norm, min_a, max_a):
-    return a_norm * (max_a - min_a + 0.0001) + min_a
-
-def trunc(values, decs=0):
-    return np.trunc(values*10**decs)/(10**decs)
-
-def convert_to_windows(data, model):
-    windows = []
-    w_size = model.n_window
-    for i, g in enumerate(data):
-        if i >= w_size:
-            w = data[i - w_size:i]  # cut
-        else:
-            w = torch.cat([data[0].repeat(w_size - i, 1), data[0:i]])  # pad
-        windows.append(w if 'DTAAD' in model.name or 'Attention' in model.name or 'TranAD' in model.name else w.view(-1))
-    return torch.stack(windows)
-
-def load_model(modelname, dims):
-    import src.models
-    model_class = getattr(src.models, modelname)
-    model = model_class(dims).double()
-    fname = f'checkpoints/{model.name}_{args.dataset}/model.ckpt'
-    if os.path.exists(fname) and (not args.retrain or args.test):
-        checkpoint = torch.load(fname, weights_only=False, map_location='cpu')
-        model.load_state_dict(checkpoint['model_state_dict'])
-    else:
-        print(f"{color.GREEN}Creating new model: {model.name}{color.ENDC}")
-        assert True
-    return model
-
-def filter_noise_es(df, alpha=0.4, reduction=False):
-    import copy
-    new_df = copy.deepcopy(df)
-    
-    for column in df:
-        new_df[column] = df[column].ewm(alpha=alpha, adjust=False).mean()
-    
-    if reduction:
-        return new_df[::len(df)]  # Adjust sparsity if needed
-    else:
-        return new_df
-
-def wgn_pandas(df_withtime, snr, alpha=0.15, window_size=120):
-    df_no_timestamp = df_withtime.drop(columns=['TimeStamp'])
-    noisy_df = pd.DataFrame(index=df_no_timestamp.index, columns=df_no_timestamp.columns)
-
-    for start in range(0, len(df_no_timestamp), window_size):
-        window = df_no_timestamp.iloc[start:start + window_size]
-        
-        Ps = np.sum(np.power(window, 2), axis=0) / len(window)
-        Pn = Ps / (np.power(10, snr / 10))
-
-        noise = np.random.randn(*window.shape) * np.sqrt(Pn.values)
-        noisy_window = window + (noise / 100)
-
-        noisy_df.iloc[start:start + window_size] = noisy_window
-    
-    noisy_df.reset_index(drop=True, inplace=True)
-    noisy_df = filter_noise_es(pd.DataFrame(noisy_df, columns=noisy_df.columns), alpha)
-
-    df_timestamp = df_withtime['TimeStamp']
-    df_timestamp.reset_index(drop=True, inplace=True)
-
-    df_withtime = pd.concat([df_timestamp, noisy_df], axis=1)
-    return df_withtime
-
-def preprocessPD_loadData(df_sel):
-    df_sel = wgn_pandas(df_sel, 30, alpha=0.15)
-
-    df_timestamp = df_sel.iloc[:, 0]
-    df_feature =  df_sel.iloc[:, 1:]
-    df_feature = df_feature[feature_set]
-
-    df_feature, _, _ = normalize3(df_feature, min_a, max_a)
-    df_feature = df_feature.astype(float)
-
-    test_loader = DataLoader(df_feature.values, batch_size=df_feature.shape[0])
-    testD = next(iter(test_loader))
-    testO = testD
-
-    return testD, testO, df_timestamp, df_feature
-
-def label_load(row):
-   if row['Active Power'] < 1 and row['Governor speed actual'] < 1:
-      return 'Shutdown'
-   elif row['Active Power'] < 3 and row['Governor speed actual'] < 250:
-      return 'Warming'
-   elif row['Active Power'] < 3 and row['Governor speed actual'] > 250:
-      return 'No Load'
-   elif row['Active Power'] >= 1 and row['Active Power'] < 20 and row['Governor speed actual'] > 250:
-      return 'Low Load'
-   elif row['Active Power'] >= 20 and row['Active Power'] < 40 and row['Governor speed actual'] > 250:
-      return 'Rough Zone'
-   elif row['Active Power'] >= 40 and row['Active Power'] < 50 and row['Governor speed actual'] > 250:
-      return 'Part Load'
-   elif row['Active Power'] >= 50 and row['Active Power'] < 65 and row['Governor speed actual'] > 250:
-      return 'Efficient Load'
-   elif row['Active Power'] >= 65 and row['Governor speed actual'] > 250:
-      return 'High Load'
-   else:
-      return 'Undefined'
-   
-def update_global_stats(mean_global, M2_global, n_total, mean_i, std_i, n_i):
-    """
-    Update global mean and variance accumulator M2 using a new window's stats.
-    """
-    delta = mean_i - mean_global
-    new_total = n_total + n_i
-    mean_global += delta * n_i / new_total
-    M2_global += std_i**2 * (n_i - 1)
-    M2_global += delta**2 * n_total * n_i / new_total
-
-    return mean_global, M2_global, new_total
-
-def percentage2severity(value):
-    return (
-        0 if 0 <= value < 25 else
-        1 if 25 <= value < 50 else
-        2 if 50 <= value < 75 else
-        3 if 75 <= value <= 100 else
-        4
-    )
-
-def calcThres_oneModel(current_time, model_now, current_loss):
-    temp_severity = {}
-    end_date = current_time - timedelta(hours=6)
-    start_date = current_time - timedelta(days=1)
-
-    end_date = end_date.strftime('%Y-%m-%d %H:%M:%S')
-    start_date = start_date.strftime('%Y-%m-%d %H:%M:%S')
-
-    mean_data = fetch_between_dates(start_date, end_date, "db/threshold_mean.db", model_now)[0, 2:].astype(float)
-    m2_data = fetch_between_dates(start_date, end_date, "db/threshold_m2.db", model_now)[0, 2:].astype(float)
-    count_data = fetch_between_dates(start_date, end_date, "db/threshold_count.db", model_now)[0, 2:].astype(float)
-
-    for sensor_idx in range(current_loss.shape[-1]):
-        now_loss = current_loss[:, sensor_idx]
-        std_global = (m2_data[sensor_idx] / (count_data[sensor_idx] - 1))**0.5 if count_data[sensor_idx] > 1 else 0.0
-
-        loss_threb = mean_data[sensor_idx] - (1 * std_global)
-        loss_thre0 = mean_data[sensor_idx] + (0 * std_global)
-        loss_thre1 = mean_data[sensor_idx] + (1 * std_global)
-        loss_thre2 = mean_data[sensor_idx] + (2 * std_global)
-
-        level_1 = (now_loss <= loss_threb)
-        level_2 = (now_loss > loss_thre0) & (now_loss <= loss_thre1)
-        level_3 = (now_loss > loss_thre1) & (now_loss <= loss_thre2)
-        level_4 = (now_loss > loss_thre2)
-
-        x_len = len(now_loss)
-        n1 = np.sum(level_1) / x_len
-        n2 = np.sum(level_2) / x_len
-        n3 = np.sum(level_3) / x_len
-        n4 = np.sum(level_4) / x_len
-
-        raw_score = (0.2 * n1 + 2 * n2 + 3 * n3 + 4 * n4)
-        normalized_score = max(0.0, ((raw_score - 1) / 3) * 100)
-        temp_severity[feature_set[sensor_idx]] = round(float(normalized_score), 2)
-
-    return temp_severity
-
-def calc_counterPercentage(threshold_percentages):
-    mean_severity_percentage = {}
-    for feature_name in feature_set:
-        mean_severity_percentage[feature_name] = {"count": 0, "percentage": 0}
-
-    for modex_idx, values_pred in threshold_percentages.items():
-        for name_feat, percentage in values_pred.items():
-            mean_severity_percentage[name_feat]["count"] = mean_severity_percentage[name_feat]["count"] + 1 if percentage >= 20 else 0
-            mean_severity_percentage[name_feat]["percentage"] = mean_severity_percentage[name_feat]["percentage"] + percentage
-
-    for key, value in mean_severity_percentage.items():
-        if mean_severity_percentage[key]['count'] >= 2:
-            mean_severity_percentage[key]['count'] = round((mean_severity_percentage[key]['count'] / len(model_array)) * 100, 2)
-            mean_severity_percentage[key]['percentage'] = (mean_severity_percentage[key]['percentage'] // len(model_array))
-            mean_severity_percentage[key]['severity'] = percentage2severity(mean_severity_percentage[key]['percentage'])
-        else:
-            mean_severity_percentage[key]['count'] = 0
-            mean_severity_percentage[key]['percentage'] = 0
-            mean_severity_percentage[key]['severity'] = 0
-
-    mean_severity_percentage = dict(sorted(mean_severity_percentage.items(), key=lambda item: item[1]['percentage'], reverse=True))
-
-    # Find Which Model Have Highest Confidence
-    counter_feature_plot = {}
-    for index, value in mean_severity_percentage.items():
-        higher_data = {"model": 0, "percentage": 0}
-        for model_idx in threshold_percentages:
-            if index in threshold_percentages[model_idx]:
-                if higher_data["percentage"] <= threshold_percentages[model_idx][index]:
-                    higher_data["model"] = model_idx
-                    higher_data["percentage"] = threshold_percentages[model_idx][index]
-        
-        counter_feature_plot[index] = higher_data['model']
-
-    return mean_severity_percentage, counter_feature_plot
-
-
-def init_db_timeconst(feature_set, db_name="masters_data.db", table_name="severity_trending"):
-    conn = sqlite3.connect(db_name)
-    cursor = conn.cursor()
-    
-    # Create table if it does not exist
-    columns = ", ".join([feature_name.replace(" ", "_") for feature_name in feature_set])
-    cursor.execute(f"""
-        CREATE TABLE IF NOT EXISTS {table_name} (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp TEXT,
-            {columns}
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-
-def batch_timeseries_savedb(df_timestamps, data, feature_set, db_name="data.db", table_name="sensor_data"):
-    conn = sqlite3.connect(db_name)
-    cursor = conn.cursor()
-    
-    # Convert timestamps to ISO format
-    timestamps = [pd.to_datetime(ts).isoformat() for ts in df_timestamps]
-    
-    # Build column names for features, replacing spaces with underscores
-    feature_columns = ', '.join([feature_name.replace(" ", "_") for feature_name in feature_set])
-    placeholders = ', '.join(['?' for _ in range(len(feature_set)+1)])  # 30 features + 1 timestamp
-    
-    # Prepare batch data
-    batch_data = [(timestamps[i], *data[i]) for i in range(data.shape[0])]
-    
-    # Upsert using INSERT OR REPLACE (Ensure UNIQUE constraint on timestamp in your DB schema)
-    sql = f"""
-        INSERT OR REPLACE INTO {table_name} (timestamp, {feature_columns})
-        VALUES ({placeholders})
-    """
-    
-    cursor.executemany(sql, batch_data)
-    conn.commit()
-    conn.close()
-
-def timeseries_savedb(df_timestamp, data, feature_set, db_name="data.db", table_name="sensor_data"):
-    conn = sqlite3.connect(db_name)
-    cursor = conn.cursor()
-    # Generate timestamp
-    timestamp = df_timestamp.isoformat()
-    
-    # Build column names for features, replacing spaces with underscores
-    feature_columns = ', '.join([feature_name.replace(" ", "_") for feature_name in feature_set])
-    placeholders = ', '.join(['?' for _ in range(len(feature_set))])
-    
-    # Upsert using INSERT OR REPLACE
-    # Note: Your table must have a UNIQUE constraint on the timestamp column.
-    sql = f"""
-        INSERT OR REPLACE INTO {table_name} (timestamp, {feature_columns})
-        VALUES (?, {placeholders})
-    """
-    cursor.execute(sql, (timestamp, *data))
-    
-    conn.commit()
-    conn.close()
-
-def fetch_between_dates(start_date, end_date, db_name="data.db", table_name="sensor_data"):
-    start_date = start_date.replace(" ", "T")
-    end_date = end_date.replace(" ", "T")
-    
-    conn = sqlite3.connect(db_name)
-    cursor = conn.cursor()
-    
-    cursor.execute(f"""
-        SELECT * FROM {table_name} WHERE timestamp BETWEEN ? AND ?
-    """, (start_date, end_date))
-    
-    rows = cursor.fetchall()
-    conn.close()
-
-    if not rows:
-        return np.array([])
-    
-    return np.array(rows)
-
-def convert_timestamp(timestamp_str):
-    dt = datetime.fromisoformat(timestamp_str)
-    return pd.Timestamp(dt.strftime('%Y-%m-%d %H:%M:%S'))
-
-feature_set = ['Active Power', 'Reactive Power', 'Governor speed actual', 'UGB X displacement', 'UGB Y displacement',
-    'LGB X displacement', 'LGB Y displacement', 'TGB X displacement',
-    'TGB Y displacement', 'Stator winding temperature 13',
-    'Stator winding temperature 14', 'Stator winding temperature 15',
-    'Surface Air Cooler Air Outlet Temperature',
-    'Surface Air Cooler Water Inlet Temperature',
-    'Surface Air Cooler Water Outlet Temperature',
-    'Stator core temperature', 'UGB metal temperature',
-    'LGB metal temperature 1', 'LGB metal temperature 2',
-    'LGB oil temperature', 'Penstock Flow', 'Turbine flow',
-    'UGB cooling water flow', 'LGB cooling water flow',
-    'Generator cooling water flow', 'Governor Penstock Pressure',
-    'Penstock pressure', 'Opening Wicked Gate', 'UGB Oil Contaminant',
-    'Gen Thrust Bearing Oil Contaminant']
+feature_set = ['Active Power', 'Reactive Power', 'Governor speed actual', 'UGB X displacement', 
+               'UGB Y displacement', 'LGB X displacement', 'LGB Y displacement', 'TGB X displacement',
+               'TGB Y displacement', 'Stator winding temperature 13',
+               'Stator winding temperature 14', 'Stator winding temperature 15',
+               'Surface Air Cooler Air Outlet Temperature',
+               'Surface Air Cooler Water Inlet Temperature',
+               'Surface Air Cooler Water Outlet Temperature',
+               'Stator core temperature', 'UGB metal temperature',
+               'LGB metal temperature 1', 'LGB metal temperature 2',
+               'LGB oil temperature', 'Penstock Flow', 'Turbine flow',
+               'UGB cooling water flow', 'LGB cooling water flow',
+               'Generator cooling water flow', 'Governor Penstock Pressure',
+               'Penstock pressure', 'Opening Wicked Gate', 'UGB Oil Contaminant',
+               'Gen Thrust Bearing Oil Contaminant']
 
 with open('normalize_2023.pickle', 'rb') as handle:
     normalize_obj = pickle.load(handle)
     min_a, max_a = normalize_obj['min_a'], normalize_obj['max_a']
 
-model_array = ["DTAAD", "DAGMM", "USAD"] #["Attention", "DTAAD", "MAD_GAN", "TranAD", "DAGMM", "USAD", "OmniAnomaly"] # , CAE_M "GDN" MSCRED
-model_thr = {}
+commons.init_db_timeconst(feature_set, "db/original_data.db", "original_data")
+# init_db_timeconst(['Grid Selection'], "db/original_data.db", "additional_original_data")
+commons.init_db_timeconst(feature_set, "db/severity_trendings.db", "severity_trendings")
+commons.init_db_timeconst(feature_set, "db/severity_trendings.db", "original_sensor")
 for model_name in model_array:
-    model_thr[model_name] = 0
+    commons.init_db_timeconst(feature_set, "db/pred_data.db", model_name)
+    commons.init_db_timeconst(feature_set, "db/threshold_data.db", model_name)
 
-for model_now in model_array:
-    with open(f'loss_fold/{args.dataset}/{model_now}.pickle', 'rb') as handle:
-        loss = pickle.load(handle)
-    model_thr[model_now] = [np.percentile(loss[:, index], 99) for index in range(len(feature_set))]
+    commons.init_db_timeconst(feature_set, "db/adaptive_mean.db", model_name)
+    commons.init_db_timeconst(feature_set, "db/adaptive_m2.db", model_name)
+    commons.init_db_timeconst(feature_set, "db/adaptive_count.db", model_name)
 
-measured_horizon = 60 * 2 * 1
-
-df_data_withtime = pd.read_pickle("/run/media/fourier/Data2/Pras/Vale/time-series-autoencoder/my_data_5thn_olah.pickle")
+# df_data_withtime = pd.read_pickle("/run/media/fourier/Data2/Pras/Vale/time-series-autoencoder/my_data_5thn_olah.pickle")
+df_data_withtime = pd.read_csv("Data20212025.csv", parse_dates=['TimeStamp'])
 mask = (df_data_withtime['TimeStamp'] >= '2020-01-01 00:00:00')
-df_data_withtime = df_data_withtime.loc[mask]
-
+df_data_withtime = df_data_withtime.loc[mask].sort_values("TimeStamp").reset_index(drop=True)
 for column_name in df_data_withtime.columns:
     if column_name != 'Load_Type' and column_name != 'TimeStamp':
-        df_data_withtime[column_name] = pd.to_numeric(df_data_withtime[column_name], downcast='float')
-        
-df_anomaly = pd.read_excel("/run/media/fourier/Data2/Pras/Vale/time-series-autoencoder/shutdown_list.xlsx", 'Sheet2')
-df_anomaly['Start Time'] = pd.to_datetime(df_anomaly['Start Time'])
-df_anomaly['End Time'] = pd.to_datetime(df_anomaly['End Time'])
-df_anomaly_unplaned = df_anomaly.copy()
+        df_data_withtime[column_name] = pd.to_numeric(
+            df_data_withtime[column_name], downcast='float')
 
-mask = (df_anomaly_unplaned['Interal/External'] == 'Internal') & (df_anomaly_unplaned['Shutdown Type'] == 'Unplanned') & (df_anomaly_unplaned['Start Time'] >= '2020-01-01 00:00:00')
-df_anomaly_unplaned = df_anomaly_unplaned.loc[mask]
-df_anomaly_unplaned = df_anomaly_unplaned.reset_index(drop=True)
-df_anomaly_unplaned = df_anomaly_unplaned.drop(df_anomaly_unplaned.index[[2]])
-df_anomaly_unplaned = df_anomaly_unplaned.reset_index(drop=True)
-df_anomaly_unplaned
+df_anomaly_unplaned = (
+    pd.read_excel("/run/media/fourier/Data2/Pras/Vale/time-series-autoencoder/shutdown_list.xlsx", sheet_name='Sheet2')
+    .assign(
+        **{'Start Time': lambda df: pd.to_datetime(df['Start Time']),
+           'End Time': lambda df: pd.to_datetime(df['End Time'])}
+    )
+    .query("`Interal/External` == 'Internal' and `Shutdown Type` == 'Unplanned' and `Start Time` >= '2020-01-01'")
+    .reset_index(drop=True)
+)
+df_anomaly_unplaned = df_anomaly_unplaned.drop(df_anomaly_unplaned.index[[2]]).reset_index(drop=True)
 
-# Calc Initial
-mean_global = {}
-M2_global = {}
-n_total = {}
-for model_now in model_array:
-    mean_global[model_now] = {}
-    M2_global[model_now] = {}
-    n_total[model_now] = {}
-    for feature_name in feature_set:
-        mean_global[model_now][feature_name] = 0.0
-        M2_global[model_now][feature_name] = 0.0
-        n_total[model_now][feature_name] = 0.0
-
-interval_gap = 30
-end_date_filter = pd.to_datetime('2020-06-30 06:15:00') #- timedelta(minutes=5)
-start_trend_filter = pd.to_datetime('2020-01-01 06:15:00') #- timedelta(days=120)
-current_end_window = start_trend_filter
-
-df_timestamp_last = np.datetime64('2012-04-28T04:16:00.000000000')
-total_steps = int((end_date_filter - current_end_window).total_seconds() // (interval_gap * 60)) + 1
-for _ in tqdm(range(total_steps), desc="Progress"):
-    start_date_window = current_end_window - timedelta(minutes=measured_horizon)
-    mask = (df_data_withtime['TimeStamp'] > start_date_window.strftime('%Y-%m-%d %H:%M:%S')) & (
-        df_data_withtime['TimeStamp'] <= current_end_window.strftime('%Y-%m-%d %H:%M:%S'))
-    df_sel = df_data_withtime.loc[mask]
-    df_additional = df_sel[['Grid Selection']].copy()
-    df_additional = df_additional.astype(float)
-    df_sel = df_sel[['TimeStamp'] + feature_set]
-
-    load_label = df_sel.apply(label_load, axis=1).value_counts()
-    no_load = load_label.get('No Load', 0)
-    shutdown = load_label.get('Shutdown', 0)
-    total = load_label.sum()
-    bad_pct = (no_load + shutdown) / total
-    if bad_pct > 0.01:  # More than 5%
-        continue
-
-    testD, testO, df_timestamp, df_feature = preprocessPD_loadData(df_sel)
-    df_timestamp = df_timestamp.values
-
+if True:
+    mean_global = {}
+    M2_global = {}
+    n_total = {}
     for model_now in model_array:
-        model = load_model(model_now, testO.shape[1])
-        model.eval()
-        torch.zero_grad = True
+        with open(f'loss_fold/{args.dataset}/{model_now}_statistics.pickle', 'rb') as handle:
+            now_statistics = pickle.load(handle)
+        mean_global[model_now] = np.array(now_statistics["mean"])
+        M2_global[model_now] = np.array(now_statistics["m2"])
+        n_total[model_now] = np.array(now_statistics["count"])
 
-        if model.name in ['Attention', 'DAGMM', 'USAD', 'MSCRED', 'CAE_M', 'GDN', 'MTAD_GAT', 'MAD_GAN', 'TranAD'] or 'DTAAD' in model.name:
-            testD_now = convert_to_windows(testD, model)
-        else:
-            testD_now = testD    
-        loss, y_pred = backprop(0, model, testD_now, testO, None, None, training=False)
+    df_timestamp_last = np.datetime64('2012-04-28T04:16:00.000000000')
+    end_date_filter = pd.to_datetime('2020-06-30 06:15:00')  # - timedelta(minutes=5)
+    start_trend_filter = pd.to_datetime('2020-01-01 06:15:00')  # - timedelta(days=120)
+    current_end_window = start_trend_filter
 
-        for i_loss in range(loss.shape[-1]):
-            mean_i = np.mean(loss[:, i_loss])
-            std_i = np.std(loss[:, i_loss], ddof=1)
-            n_i = len(loss[:, i_loss])
+    total_steps = int((end_date_filter - current_end_window).total_seconds() // (interval_gap * 60)) + 1
+    for step_prog in tqdm(range(total_steps), desc="Progress"):
+        start_date_window = current_end_window - timedelta(minutes=measured_horizon)
+        mask = (df_data_withtime['TimeStamp'] > start_date_window.strftime('%Y-%m-%d %H:%M:%S')) & (df_data_withtime['TimeStamp'] <= current_end_window.strftime('%Y-%m-%d %H:%M:%S'))
+        df_sel = df_data_withtime.loc[mask]
+        df_sel = df_sel[['TimeStamp'] + feature_set]
 
-            feature_now_name = feature_set[i_loss]
-            mean_global[model_now][feature_now_name], M2_global[model_now][feature_now_name], n_total[model_now][feature_now_name] = update_global_stats(
-                mean_global[model_now][feature_now_name], M2_global[model_now][feature_now_name], n_total[model_now][feature_now_name], mean_i, std_i, n_i
-            )
+        load_label = df_sel.apply(commons.label_load, axis=1).value_counts()
+        if (load_label.get('No Load', 0) + load_label.get('Shutdown', 0)) > 0: # load_label.get('No Load', 0) + load_label.get('Shutdown', 0)
+            # DONT REMOVE THIS
+            df_timestamp_last = df_sel['TimeStamp'].values[-1]
+            current_end_window += timedelta(minutes=interval_gap)
+            continue
 
-    # DONT REMOVE THIS
-    df_timestamp_last = df_timestamp[-1]
-    current_end_window += timedelta(minutes=interval_gap)
+        testD, testO, df_timestamp, df_feature = commons.preprocessPD_loadData(df_sel, feature_set, min_a, max_a)
 
-init_db_timeconst(feature_set, "db/original_data.db", "original_data")
-init_db_timeconst(['Grid Selection'], "db/original_data.db", "additional_original_data")
-init_db_timeconst(feature_set, "db/severity_trendings.db", "severity_trendings")
-init_db_timeconst(feature_set, "db/severity_trendings.db", "original_sensor")
-for model_name in model_array:
-    init_db_timeconst(feature_set, "db/pred_data.db", model_name)
-    init_db_timeconst(feature_set, "db/threshold_data.db", model_name)
-    
-    init_db_timeconst(feature_set, "db/threshold_mean.db", model_name)
-    init_db_timeconst(feature_set, "db/threshold_m2.db", model_name)
-    init_db_timeconst(feature_set, "db/threshold_count.db", model_name)
+        df_timestamp = df_timestamp.dt.floor("min")[::6].values[:20]
+        mask = df_timestamp > df_timestamp_last
+        df_timestamp = df_timestamp[mask]
+        df_timestampi = pd.to_datetime(df_timestamp[0])
 
-interval_gap = 30
-end_date_filter = pd.to_datetime('2023-12-28 00:00:00') #- timedelta(minutes=5)
-start_trend_filter = pd.to_datetime('2020-06-30 06:20:00') #- timedelta(days=120)
+        for model_now in model_array:
+            if step_prog > 50:
+                end_date = (current_end_window - timedelta(hours=3)).strftime('%Y-%m-%d %H:%M:%S')
+                start_date = (current_end_window - timedelta(hours=12)).strftime('%Y-%m-%d %H:%M:%S')
+
+                try:
+                    mean_data = commons.fetch_between_dates(start_date, end_date, "db/adaptive_mean.db", model_now)[-1, 2:].astype(float)
+                    m2_data = commons.fetch_between_dates(start_date, end_date, "db/adaptive_m2.db", model_now)[-1, 2:].astype(float)
+                    count_data = commons.fetch_between_dates(start_date, end_date, "db/adaptive_count.db", model_now)[-1, 2:].astype(float)
+                    
+                    mean_global[model_now] = mean_data
+                    M2_global[model_now] = m2_data
+                    n_total[model_now] = count_data
+                except:
+                    end_date = (current_end_window - timedelta(hours=3)).strftime('%Y-%m-%d %H:%M:%S')
+                    start_date = (current_end_window - timedelta(days=3)).strftime('%Y-%m-%d %H:%M:%S')
+
+                    mean_data = commons.fetch_between_dates(start_date, end_date, "db/adaptive_mean.db", model_now)[-1, 2:].astype(float)
+                    m2_data = commons.fetch_between_dates(start_date, end_date, "db/adaptive_m2.db", model_now)[-1, 2:].astype(float)
+                    count_data = commons.fetch_between_dates(start_date, end_date, "db/adaptive_count.db", model_now)[-1, 2:].astype(float)
+                    
+                    mean_global[model_now] = mean_data
+                    M2_global[model_now] = m2_data
+                    n_total[model_now] = count_data
+
+            model = commons.load_model(args.dataset, model_now, testO.shape[1], args.retrain, args.test)
+            model.eval()
+            torch.zero_grad = True
+            if model.name in ['Attention', 'DAGMM', 'USAD', 'MSCRED', 'CAE_M', 'GDN', 'MTAD_GAT', 'MAD_GAN', 'TranAD'] or 'DTAAD' in model.name:
+                testD_now = commons.convert_to_windows(testD, model)
+            else:
+                testD_now = testD
+            loss, y_pred = backprop(0, model, testD_now, testO, None, None, training=False)
+
+            for i_loss in range(loss.shape[-1]):
+                na_feature = feature_set[i_loss]
+
+                mean_i = np.mean(loss[:, i_loss])
+                std_i = np.std(loss[:, i_loss], ddof=1)
+                n_i = len(loss[:, i_loss])
+
+                mean_prev = mean_global[model_now][i_loss]
+                M2_prev = M2_global[model_now][i_loss]
+                n_prev = n_total[model_now][i_loss]
+
+                mean_new, M2_new, n_new = commons.update_statisticGlobal(mean_prev, M2_prev, n_prev, mean_i, std_i, n_i)
+                mean_global[model_now][i_loss] = mean_new
+                M2_global[model_now][i_loss] = M2_new
+                n_total[model_now][i_loss] = n_new
+
+            commons.timeseries_savedb(df_timestampi, commons.trunc(mean_global[model_now], decs=6), feature_set, "db/adaptive_mean.db", model_now)
+            commons.timeseries_savedb(df_timestampi, commons.trunc(M2_global[model_now], decs=6), feature_set, "db/adaptive_m2.db", model_now)
+            commons.timeseries_savedb(df_timestampi, commons.trunc(n_total[model_now], decs=1), feature_set, "db/adaptive_count.db", model_now)
+
+        # DONT REMOVE THIS
+        df_timestamp_last = df_timestamp[-1]
+        current_end_window += timedelta(minutes=interval_gap)
+
+
+df_timestamp_last = np.datetime64('2020-06-30T06:15:00')
+end_date_filter = pd.to_datetime('2025-06-02 09:35:00')  # - timedelta(minutes=5)
+start_trend_filter = pd.to_datetime('2020-07-01 06:15:00')  # - timedelta(days=120)
 current_end_window = start_trend_filter
 
-df_timestamp_last = np.datetime64('2020-06-30T06:10:00.000000000')
 total_steps = int((end_date_filter - current_end_window).total_seconds() // (interval_gap * 60)) + 1
 for _ in tqdm(range(total_steps), desc="Progress"):
     start_date_window = current_end_window - timedelta(minutes=measured_horizon)
-    mask = (df_data_withtime['TimeStamp'] > start_date_window.strftime('%Y-%m-%d %H:%M:%S')) & (
-        df_data_withtime['TimeStamp'] <= current_end_window.strftime('%Y-%m-%d %H:%M:%S'))
+    mask = (df_data_withtime['TimeStamp'] > start_date_window.strftime('%Y-%m-%d %H:%M:%S')) & (df_data_withtime['TimeStamp'] <= current_end_window.strftime('%Y-%m-%d %H:%M:%S'))
     df_sel = df_data_withtime.loc[mask].iloc[:120, :]
-    df_additional = df_sel[['Grid Selection']].copy()
-    df_additional = df_additional.astype(float)
     df_sel = df_sel[['TimeStamp'] + feature_set]
 
-    load_label = df_sel.apply(label_load, axis=1).value_counts()
-    no_load = load_label.get('No Load', 0)
-    shutdown = load_label.get('Shutdown', 0)
-    total = load_label.sum()
-    bad_pct = (no_load + shutdown) / total
+    load_label = df_sel.apply(commons.label_load, axis=1).value_counts()
+    bad_pct = (load_label.get('No Load', 0) +  load_label.get('Shutdown', 0)) / load_label.sum()
 
-    testD, testO, df_timestamp, df_feature = preprocessPD_loadData(df_sel)
-    df_timestamp = df_timestamp.dt.floor("min").values[:120]
+    testD, testO, df_timestamp, df_feature = commons.preprocessPD_loadData(df_sel, feature_set, min_a, max_a)
 
     threshold_percentages = {}
-    ypred_models = {} 
+    ypred_models = {}
     calc_stats = {}
     for model_now in model_array:
-        model = load_model(model_now, testO.shape[1])
+        model = commons.load_model(args.dataset, model_now, testO.shape[1], args.retrain, args.test)
         model.eval()
         torch.zero_grad = True
         if model.name in ['Attention', 'DAGMM', 'USAD', 'MSCRED', 'CAE_M', 'GDN', 'MTAD_GAT', 'MAD_GAN', 'TranAD'] or 'DTAAD' in model.name:
-            testD_now = convert_to_windows(testD, model)
+            testD_now = commons.convert_to_windows(testD, model)
         else:
             testD_now = testD
         loss, y_pred = backprop(0, model, testD_now, testO, None, None, training=False)
-        ypred_models[model_now] = denormalize3(y_pred, min_a, max_a)
-        threshold_percentages[model_now] = calcThres_oneModel(current_end_window, model_now, loss)
 
-        calc_stats[model_now] = {}
+        ypred_models[model_now] = commons.denormalize3(y_pred, min_a, max_a)
+        threshold_percentages[model_now], mean_data, m2_data, count_data = commons.calcThres_oneModel(current_end_window, model_now, feature_set, loss)
+
+        calc_stats[model_now] = { "mean_glob": mean_data, "m2_glob": m2_data, "count_glob": count_data, "status_feat": {}}
         for idx_feat in range(loss.shape[-1]):
             feature_now_name = feature_set[idx_feat]
 
-            calc_stats[model_now][feature_now_name] = True
-            temp_std = (M2_global[model_now][feature_now_name] / (n_total[model_now][feature_now_name] - 1))**0.5 if n_total[model_now][feature_now_name] > 1 else 0.0
-            temp_mean = mean_global[model_now][feature_now_name]
+            calc_stats[model_now]["status_feat"][feature_now_name] = True
+            if threshold_percentages[model_now][feature_now_name] >= 5.0:
+                calc_stats[model_now]["status_feat"][feature_now_name] = False
 
-            thres_bool1 = (loss[:, idx_feat] > temp_mean) & (loss[:, idx_feat] < temp_mean + temp_std)
-            thres_percentage1 = (thres_bool1.sum() / thres_bool1.shape[0]) * 100
+    df_feature = commons.denormalize3(df_feature, min_a, max_a)
+    df_feature_mean = commons.trunc(np.mean(df_feature.values, axis=0), decs=2)
 
-            thres_bool2 = loss[:, idx_feat] > temp_mean + (temp_std)
-            thres_percentage2 = (thres_bool2.sum() / thres_bool2.shape[0]) * 100
-
-            # thres_bool2 = loss[:, idx_feat] < temp_mean - (temp_std)
-            # thres_percentage2 = (thres_bool2.sum() / thres_bool2.shape[0]) * 100
-
-            # Perhatikan Threshold ini
-            if thres_percentage1 >= 30 or thres_percentage2 >= 5: # or thres_percentage2 >= 50:
-                calc_stats[model_now][feature_now_name]  = False
-
-    df_feature_mean = trunc(np.mean(df_feature.values, axis=0), decs=2)
     df_feature = resample(df_feature, 20, axis=0)
-    df_additional = resample(df_additional, 20, axis=0)
+    # df_additional = resample(df_additional, 20, axis=0)
     df_timestamp = df_timestamp.dt.floor("min")[::6].values[:20]
-    for i in range(len(model_array)):
-        ypred_models[i] = resample(ypred_models[i], 20, axis=0)
+    for model_now in model_array:
+        ypred_models[model_now] = resample(ypred_models[model_now], 20, axis=0)
+
+    min_len = min(len(df_timestamp), len(df_feature), *[len(ypred_models[m]) for m in model_array])
+    df_timestamp = df_timestamp[:min_len]
+    df_feature = df_feature[:min_len]
+    for model_now in model_array:
+        ypred_models[model_now] = ypred_models[model_now][:min_len]
 
     mask = df_timestamp > df_timestamp_last
-    df_feature = denormalize3(df_feature, min_a, max_a)
-    df_feature = df_feature[mask].values
-    df_additional = df_additional[mask].values
+    df_feature = df_feature[mask]
     df_timestamp = df_timestamp[mask]
     for model_now in model_array:
         ypred_models[model_now] = ypred_models[model_now][mask]
-     
-    batch_timeseries_savedb(df_timestamp, trunc(df_feature, decs=2), feature_set, "db/original_data.db", "original_data")
-    batch_timeseries_savedb(df_timestamp, trunc(df_additional, decs=2), ['Grid Selection'], "db/original_data.db", "additional_original_data")
+
+    commons.batch_timeseries_savedb(df_timestamp, commons.trunc(df_feature, decs=2), feature_set, "db/original_data.db", "original_data")
+    # batch_timeseries_savedb(df_timestamp, trunc(df_additional, decs=2), ['Grid Selection'], "db/original_data.db", "additional_original_data")
     for idx_model, (model_name) in enumerate(model_array):
-        batch_timeseries_savedb(df_timestamp, trunc(ypred_models[model_name], decs=2), feature_set, "db/pred_data.db", model_name) 
+        commons.batch_timeseries_savedb(df_timestamp, commons.trunc(ypred_models[model_name], decs=2), feature_set, "db/pred_data.db", model_name)
 
-    df_timestampi = pd.to_datetime(df_timestamp[0])
-    counter_feature_trd, _ = calc_counterPercentage(threshold_percentages)
-    trend_data = np.array([counter_feature_trd[key]['percentage'] for key in counter_feature_trd])
-    timeseries_savedb(df_timestampi, trend_data, feature_set, "db/severity_trendings.db", "severity_trendings") 
-    timeseries_savedb(df_timestampi, df_feature_mean, feature_set, "db/severity_trendings.db", "original_sensor") 
+    df_timestampi = pd.to_datetime(df_timestamp[-1])
+    counter_feature_trd, _ = commons.calc_counterPercentage(threshold_percentages, feature_set, model_array)
+    trend_data = np.array([counter_feature_trd[key]['percentage']for key in counter_feature_trd]).astype(np.float64)
+    commons.timeseries_savedb(df_timestampi, trend_data, feature_set, "db/severity_trendings.db", "severity_trendings")
+    commons.timeseries_savedb(df_timestampi, df_feature_mean, feature_set, "db/severity_trendings.db", "original_sensor")
     for model_idx, model_name in enumerate(model_array):
-        timeseries_savedb(df_timestampi, trunc(np.array(list(threshold_percentages[model_idx].values())), decs=2), feature_set, "db/threshold_data.db", model_name) 
+        commons.timeseries_savedb(df_timestampi, commons.trunc(np.array(list(
+            threshold_percentages[model_name].values())), decs=2), feature_set, "db/threshold_data.db", model_name)
 
-
-    if bad_pct < 0.001:  # Less than 0.1%  -> Dont Calc Mean and STD
+    if bad_pct == 0.0:
         for model_now in model_array:
-                for i_loss in range(loss.shape[-1]):
-                    feature_now_name = feature_set[idx_feat]
-                    if calc_stats[model_now][feature_now_name]:
-                        mean_i = np.mean(loss[:, i_loss])
-                        std_i = np.std(loss[:, i_loss], ddof=1)
-                        n_i = len(loss[:, i_loss])
-        
-                        feature_now_name = feature_set[i_loss]
-                        mean_global[model_now][feature_now_name], M2_global[model_now][feature_now_name], n_total[model_now][feature_now_name] = update_global_stats(
-                            mean_global[model_now][feature_now_name], M2_global[model_now][feature_now_name], n_total[model_now][feature_now_name], mean_i, std_i, n_i)
+            for i_loss in range(loss.shape[-1]):
+                na_feature = feature_set[i_loss]
+                if calc_stats[model_now]["status_feat"][na_feature] == True:
+                    mean_i = np.mean(loss[:, i_loss])
+                    std_i = np.std(loss[:, i_loss], ddof=1)
+                    n_i = len(loss[:, i_loss])
+
+                    mean_glob = calc_stats[model_now]["mean_glob"][i_loss]
+                    m2_glob = calc_stats[model_now]["m2_glob"][i_loss]
+                    count_glob = calc_stats[model_now]["count_glob"][i_loss]
+
+                    mean_glob, m2_glob, count_glob = commons.update_statisticGlobal(mean_glob, m2_glob, count_glob, mean_i, std_i, n_i)
+                    calc_stats[model_now]["mean_glob"][i_loss] = mean_glob
+                    calc_stats[model_now]["m2_glob"][i_loss] = m2_glob
+                    calc_stats[model_now]["count_glob"][i_loss] = count_glob
 
     for model_idx, model_name in enumerate(model_array):
-        timeseries_savedb(df_timestampi, trunc(np.array(list(mean_global[model_name].values())), decs=6), feature_set, "db/threshold_mean.db", model_name) 
-        timeseries_savedb(df_timestampi, trunc(np.array(list(M2_global[model_name].values())), decs=6), feature_set, "db/threshold_m2.db", model_name) 
-        timeseries_savedb(df_timestampi, trunc(np.array(list(n_total[model_name].values())), decs=1), feature_set, "db/threshold_count.db", model_name) 
+        commons.timeseries_savedb(df_timestampi, commons.trunc(calc_stats[model_name]["mean_glob"], decs=6), feature_set, "db/adaptive_mean.db", model_name)
+        commons.timeseries_savedb(df_timestampi, commons.trunc(calc_stats[model_name]["m2_glob"], decs=6), feature_set, "db/adaptive_m2.db", model_name)
+        commons.timeseries_savedb(df_timestampi, commons.trunc(calc_stats[model_name]["count_glob"], decs=1), feature_set, "db/adaptive_count.db", model_name)
 
     # DONT REMOVE THIS
     df_timestamp_last = df_timestamp[-1]
